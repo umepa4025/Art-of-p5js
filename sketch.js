@@ -31,7 +31,7 @@ const EMBED = !!window.SUMI_EMBED;
 let cnv, grain = null, grainTimer = null;
 let W = 0, H = 0, U = 0, base = 0;
 let pal, palIndex = -1, inkCols = [], seed = 0;
-let polys = [];         // { x: [], y: [], fill: 'rgba(...)' } 古い順 = 描く順
+let polys = [];         // { x: [], y: [], fill: 'rgba(...)' か null(透明な液), kids: [] } 古い順 = 描く順
 let drops = [];         // 広がっている最中のしずく
 let sources = [];       // 筆を置く場所
 let hands = [];         // 二本の筆
@@ -39,14 +39,20 @@ let modes = [];         // 風を作る波
 let T = 0, phase = 'drop', phaseT = 0, windDur = 700;
 let wind = 0, windTarget = 0;
 let budget = 0, spent = 0, dropCount = 0, accentAt = new Set();
-let maxLen = 5;
+let coarse = 1, coarseBase = 1, vertCap = 24000; // coarse: 線の粗さ(1 = いちばん細かい)
+let guards = [];         // この近くは頂点を細かく保つ、という場所
+let dirty = true;        // 描き直しが必要か
+let slowAcc = 0, slowN = 0, settle = 40;
 let paused = false, skipping = false, lastTouch = -1e9;
 let pointerDown = false, ppx = 0, ppy = 0, holdT = 0, userInk = true, userK = 0;
 
 /* ------------------------------------------------------------ setup */
 
 function setup() {
-  pixelDensity(Math.min(window.devicePixelRatio || 1, 2));
+  // 画面の細かさ。画素の総数が増えすぎないように上限をかける(あとは watchSpeed が自動で下げる)
+  const fit = Math.sqrt(6e6 / (windowWidth * windowHeight));
+  const pd = Math.min(window.devicePixelRatio || 1, 2, Math.floor(fit * 4) / 4);
+  pixelDensity(Math.max(pd, 1));
   cnv = createCanvas(windowWidth, windowHeight);
   cnv.parent('sheet');
   bindUI();
@@ -66,8 +72,9 @@ function newSheet() {
 
   W = width; H = height; U = Math.min(W, H);
   base = Math.max(U * 0.06, 20);
-  polys = []; drops = [];
-  maxLen = 5;
+  polys = []; drops = []; guards = [];
+  coarse = coarseBase;
+  dirty = true;
 
   // 風: 向きと波長のちがう波を4つ重ねる
   modes = [];
@@ -119,48 +126,67 @@ function makeSource(x, y, scale) {
 }
 
 function setPhase(p) {
-  phase = p; phaseT = 0;
+  phase = p; phaseT = 0; dirty = true;
   windTarget = { drop: 0.3, wind: 1, still: 0, lift: 0 }[p];
 }
 
 /* ------------------------------------------------------------- draw */
 
 function draw() {
-  const dt = Math.min((deltaTime || 16.667) / 16.667, 2.5);
+  // 60コマ/秒を1とした経過時間。遅い端末でも作品の進む速さは変えない(15コマ/秒までは追従)
+  const dt = Math.min((deltaTime || 16.667) / 16.667, 4);
 
   if (skipping) {
     // 早送り: 画面には出さずに、1フレームあたり約24ミリ秒ぶんだけ計算を進める
     const t0 = performance.now();
-    maxLen = Math.max(maxLen, 8);
     while (skipping && performance.now() - t0 < 24) {
       conduct(2); step(2);
       if (phase === 'still' && phaseT > 300) { skipping = false; wind = 0; setPaused(true); }
     }
     document.getElementById('wait').hidden = !skipping;
-    if (skipping) { background(pal.paper); image(grain, 0, 0, W, H); return; }
+    dirty = true;
+    if (skipping) { background(pal.paper); return; }
   }
 
   handlePointer(dt);
   conduct(dt);
-  step(dt);
-  render();
+  // 何も動いていないコマは描き直さない(止まっているあいだは負荷ほぼゼロ)
+  const moving = dirty || wind > 0 || drops.length > 0 || phase === 'lift';
+  if (dt > 1.6) { step(dt / 2); step(dt / 2); } else step(dt); // コマが飛んだぶんは2回に分けて計算する
+  if (moving) { render(); dirty = false; watchSpeed(); }
+}
+
+// コマ落ちが続いたら、まず画面の細かさを、次に線の細かさを一段ずつ下げる
+function watchSpeed() {
+  if (deltaTime > 250) return; // タブが裏に回っていた等は数えない
+  if (settle > 0) { settle--; return; }
+  slowAcc += deltaTime; slowN++;
+  if (slowN < 30) return;
+  const avg = slowAcc / slowN; // 1コマにかかった平均ミリ秒(60コマ/秒なら約16.7)
+  slowAcc = 0; slowN = 0;
+  if (avg < 21) return;
+  const pd = pixelDensity();
+  if (pd > 1) {
+    pixelDensity(Math.max(1, pd - 0.5));
+  } else if (avg > 30 && pd > 0.75) {
+    pixelDensity(0.75); // 最後の手段: 少しぼけるが、なめらかさを優先する
+  } else if (avg > 30 && coarseBase < 2.4) {
+    coarseBase *= 1.3; vertCap *= 0.75;
+    coarse = Math.max(coarse, coarseBase);
+  } else return;
+  settle = 40; dirty = true;
 }
 
 function render() {
   background(pal.paper);
   const c = drawingContext;
   for (const p of polys) {
-    const x = p.x, y = p.y, n = x.length;
+    if (!p.fill) continue; // 透明な液は紙の色そのものなので描かない
     c.fillStyle = p.fill;
     c.beginPath();
-    // 頂点を「曲線の制御点」として使い、辺の中点どうしをなめらかにつなぐ
-    c.moveTo((x[n - 1] + x[0]) / 2, (y[n - 1] + y[0]) / 2);
-    for (let i = 0; i < n; i++) {
-      const j = i + 1 < n ? i + 1 : 0;
-      c.quadraticCurveTo(x[i], y[i], (x[i] + x[j]) / 2, (y[i] + y[j]) / 2);
-    }
-    c.closePath();
-    c.fill();
+    trace(c, p);
+    holes(c, p); // 内側の透明な液を「穴」としてくり抜く → 輪の部分だけを塗るので速い
+    c.fill('evenodd');
   }
   if (phase === 'lift') {
     // 紙を引き上げる: 次の紙の色でゆっくり覆う
@@ -170,7 +196,36 @@ function render() {
     c.fillRect(0, 0, W, H);
     c.globalAlpha = 1;
   }
-  image(grain, 0, 0, W, H);
+}
+
+// p の内側に落ちた透明な液の輪郭をたどる。墨の中に落ちた墨は上から重ね塗りするので穴にせず、
+// そのさらに内側の透明な液だけを穴にする
+function holes(c, p) {
+  for (const k of p.kids) {
+    if (k.fill) holes(c, k); else trace(c, k);
+  }
+}
+
+// 頂点を通るなめらかな曲線(3次ベジェ)で輪郭をなぞる。
+// 各頂点での向きは「前後の頂点を結ぶ向き」、ハンドルの長さは辺の3分の1。
+function trace(c, p) {
+  const x = p.x, y = p.y, n = x.length;
+  let bx = x[0], by = y[0], cx = x[1], cy = y[1];
+  let tx = cx - x[n - 1], ty = cy - y[n - 1];
+  let tl = Math.sqrt(tx * tx + ty * ty) || 1;
+  tx /= tl; ty /= tl;
+  c.moveTo(bx, by);
+  for (let i = 0; i < n; i++) {
+    const k = i + 2 < n ? i + 2 : i + 2 - n;
+    const dx = x[k], dy = y[k];
+    let ux = dx - bx, uy = dy - by;
+    const ul = Math.sqrt(ux * ux + uy * uy) || 1;
+    ux /= ul; uy /= ul;
+    const l = Math.sqrt((cx - bx) * (cx - bx) + (cy - by) * (cy - by)) / 3;
+    c.bezierCurveTo(bx + tx * l, by + ty * l, cx - ux * l, cy - uy * l, cx, cy);
+    bx = cx; by = cy; cx = dx; cy = dy; tx = ux; ty = uy;
+  }
+  c.closePath();
 }
 
 /* -------------------------------------------------------- 進行(自動) */
@@ -212,7 +267,7 @@ function handDrop(h) {
   s.ink = !s.ink;
   const u = noise(s.ns + 300, s.k * 0.3);
   const r = base * s.scale * (isInk ? lerp(0.3, 0.9, u) : lerp(0.6, 2.0, u));
-  let fill = pal.paper;
+  let fill = null; // null = 透明な液
   if (isInk) {
     fill = accentAt.has(dropCount) ? toRGBA(color(pal.accent), 0.9) : inkTone(s.ns, s.k);
   }
@@ -239,15 +294,34 @@ function toRGBA(c, a) {
 /* ------------------------------------------------------ 水面の物理 */
 
 function addDrop(cx, cy, r, fill) {
-  refineNear(cx, cy, maxLen * 3);
+  refineNear(cx, cy, 22);
+  let parent = null;
   const n = 12, x = [], y = [];
   for (let i = 0; i < n; i++) {
     const a = (i / n) * TWO_PI;
     x.push(cx + EPS * Math.cos(a));
     y.push(cy + EPS * Math.sin(a));
   }
-  polys.push({ x, y, fill });
-  drops.push({ cx, cy, q: r * r, s: 0, t: 0 });
+  // このしずくがどの輪の内側に落ちたか。包んでいる輪のうち、いちばん新しいものが直接の親
+  for (let i = polys.length - 1; i >= 0; i--) {
+    if (inside(polys[i], cx, cy)) { parent = polys[i]; break; }
+  }
+  const p = { x, y, fill, kids: [] };
+  if (parent) parent.kids.push(p);
+  polys.push(p);
+  const g = 1.3 * r + 12; // 広がりきるまで、この半径の内側は頂点を細かく保つ
+  drops.push({ cx, cy, q: r * r, s: 0, t: 0, g2: g * g });
+  guards = drops;
+  dirty = true;
+}
+
+function inside(p, px, py) {
+  const x = p.x, y = p.y;
+  let c = false;
+  for (let i = 0, j = x.length - 1; i < x.length; j = i++) {
+    if ((y[i] > py) !== (y[j] > py) && px < ((x[j] - x[i]) * (py - y[i])) / (y[j] - y[i]) + x[i]) c = !c;
+  }
+  return c;
 }
 
 function step(dt) {
@@ -255,6 +329,8 @@ function step(dt) {
   const target = paused ? 0 : windTarget;
   wind += (target - wind) * Math.min(0.012 * dt, 1);
   if (wind < 0.004 && target === 0) wind = 0;
+
+  if (wind === 0 && drops.length === 0) return; // 水面が静かなら計算しない
 
   if (wind > 0) advect(wind * dt, dt);
 
@@ -266,6 +342,7 @@ function step(dt) {
     d.s = s;
   }
   if (drops.length) drops = drops.filter((d) => d.t < DROP_DUR);
+  guards = drops;
 
   resampleAll();
 }
@@ -318,7 +395,11 @@ function stylus(ax, ay, bx, by) {
   if (len < 0.01) return;
   const steps = Math.min(Math.ceil(len / 4), 14);
   const sx = dx / steps, sy = dy / steps;
-  const sig2 = Math.pow(U * 0.05, 2), lim = sig2 * 9;
+  const sig = U * 0.05, sig2 = sig * sig, lim = sig2 * 9;
+  // なぞる道すじの近くは、動かす前に頂点を細かくしておく
+  const g = len / 2 + sig * 2.5;
+  guards = drops.concat({ cx: (ax + bx) / 2, cy: (ay + by) / 2, g2: g * g });
+  resampleAll(); resampleAll();
   for (let s = 0; s < steps; s++) {
     const cx = ax + sx * (s + 0.5), cy = ay + sy * (s + 0.5);
     for (const p of polys) {
@@ -331,56 +412,117 @@ function stylus(ax, ay, bx, by) {
         }
       }
     }
-    if (s % 3 === 2) resampleAll();
+    if (s % 3 === 2 || s === steps - 1) resampleAll();
   }
+  guards = drops;
+  dirty = true;
 }
 
 /* ------------------------------------------------ 頂点の足し引き */
+// 輪郭は「頂点を通るなめらかな曲線」なので、頂点は
+// まっすぐな所ではまばらに、曲がりのきつい所でだけ細かく置けば足りる。
+
+const SAG = 4;      // 「辺の長さ × 曲がり角」がこれを超えたら頂点を足す(弧のふくらみ 約0.5px に相当)
+const L_MAX = 30;   // 辺の長さの上限(px)
+let LEN = new Float64Array(2048), TURN = new Float64Array(2048), RM = new Uint8Array(2048);
 
 function visible(x, y) {
   return x > -140 && x < W + 140 && y > -140 && y < H + 140;
 }
 
+function guarded(x, y) {
+  for (let i = 0; i < guards.length; i++) {
+    const g = guards[i], dx = x - g.cx, dy = y - g.cy;
+    if (dx * dx + dy * dy < g.g2) return true;
+  }
+  return false;
+}
+
 function resampleAll() {
-  const max2 = maxLen * maxLen, min2 = max2 * 0.1;
   let total = 0;
-  for (const p of polys) {
-    const x = p.x, y = p.y, n = x.length;
-    let dirty = false;
-    for (let i = 0, j = n - 1; i < n; j = i++) {
-      const dx = x[i] - x[j], dy = y[i] - y[j], d2 = dx * dx + dy * dy;
-      if (d2 > max2) {
-        if (visible(x[i], y[i]) || visible(x[j], y[j])) { dirty = true; break; }
-      } else if (d2 < min2 && n > 12) { dirty = true; break; }
-    }
-    if (dirty) rebuild(p, max2, min2);
-    total += p.x.length;
-  }
-  if (total > 70000) maxLen = Math.min(maxLen * 1.08, 14); // 重くなりすぎたら粗くする
+  for (const p of polys) { resample(p); total += p.x.length; }
+  if (total > vertCap) coarse = Math.min(coarse * 1.04, 3); // 頂点が増えすぎたら全体を少し粗くする
 }
 
-function rebuild(p, max2, min2) {
-  const x = p.x, y = p.y, n = x.length, nx = [], ny = [];
+// 辺 i→j に頂点を足すべきか
+function needSplit(x, y, i, j, sag, lmax) {
+  const l = LEN[i];
+  if (l <= 4) return false;
+  const bend = l > lmax || l * Math.max(TURN[i], TURN[j]) > sag;
+  if (!bend && !(l > 6 * coarse && guards.length && guarded((x[i] + x[j]) / 2, (y[i] + y[j]) / 2))) return false;
+  return visible(x[i], y[i]) || visible(x[j], y[j]);
+}
+
+function resample(p) {
+  const x = p.x, y = p.y, n = x.length;
+  if (n > LEN.length) {
+    LEN = new Float64Array(n * 2); TURN = new Float64Array(n * 2); RM = new Uint8Array(n * 2);
+  }
+  const sag = SAG * coarse, lmax = L_MAX * coarse;
+
+  // 各辺の長さと、各頂点での曲がり角(小さい角ではラジアンとほぼ同じ値)
   for (let i = 0; i < n; i++) {
-    const j = i + 1 < n ? i + 1 : 0;
-    const ax = x[i], ay = y[i];
-    nx.push(ax); ny.push(ay);
-    const dx = x[j] - ax, dy = y[j] - ay, d2 = dx * dx + dy * dy;
-    if (d2 > max2) {
-      if (visible(ax, ay) || visible(x[j], y[j])) {
-        const k = Math.min(Math.ceil(Math.sqrt(d2) / maxLen), 16);
-        for (let s = 1; s < k; s++) {
-          nx.push(ax + (dx * s) / k); ny.push(ay + (dy * s) / k);
-        }
-      }
-    } else if (d2 < min2 && j !== 0 && n > 12) {
-      i++; // 次の頂点を間引く
-    }
+    const j = i + 1 < n ? i + 1 : 0, dx = x[j] - x[i], dy = y[j] - y[i];
+    LEN[i] = Math.sqrt(dx * dx + dy * dy);
   }
-  if (nx.length >= 6) { p.x = nx; p.y = ny; }
+  for (let i = 0; i < n; i++) {
+    const h = i > 0 ? i - 1 : n - 1, j = i + 1 < n ? i + 1 : 0;
+    const ax = x[i] - x[h], ay = y[i] - y[h], bx = x[j] - x[i], by = y[j] - y[i];
+    const ll = LEN[h] * LEN[i];
+    TURN[i] = ll < 1e-12 ? 0 : ax * bx + ay * by > 0 ? Math.abs(ax * by - ay * bx) / ll : 2;
+  }
+
+  // 間引く頂点を決める(となり合う2つを同時には消さない)
+  let change = false, prev = false;
+  for (let i = 0; i < n; i++) {
+    RM[i] = 0;
+    if (prev || n <= 8) { prev = false; continue; }
+    const h = i > 0 ? i - 1 : n - 1, j = i + 1 < n ? i + 1 : 0;
+    const l1 = LEN[h], l2 = LEN[i], L = l1 + l2;
+    let rm = false;
+    if ((l1 < 0.9 || l2 < 0.9) && TURN[i] < 0.5) rm = true; // 詰まりすぎ
+    else if (L < lmax * 0.7 && L * (Math.max(TURN[h], TURN[j]) + TURN[i]) < sag * 0.5) {
+      rm = !(guards.length && guarded(x[i], y[i])); // ほぼまっすぐ
+    } else if (L < 90 && !visible(x[i], y[i]) && !visible(x[h], y[h]) && !visible(x[j], y[j])) rm = true; // 画面の外
+    if (rm) { RM[i] = 1; prev = true; change = true; }
+  }
+  if (RM[0] && RM[n - 1]) RM[0] = 0;
+
+  if (!change) {
+    for (let i = 0; i < n; i++) {
+      if (needSplit(x, y, i, i + 1 < n ? i + 1 : 0, sag, lmax)) { change = true; break; }
+    }
+    if (!change) return;
+  }
+
+  const nx = [], ny = [];
+  for (let i = 0; i < n; i++) {
+    if (RM[i]) continue;
+    nx.push(x[i]); ny.push(y[i]);
+    const j = i + 1 < n ? i + 1 : 0;
+    if (RM[j] || !needSplit(x, y, i, j, sag, lmax)) continue;
+    edgePoint(x, y, n, i, 0.5);
+    nx.push(CPX); ny.push(CPY);
+  }
+  p.x = nx; p.y = ny;
 }
 
-// しずくが落ちる場所のすぐ近くだけ、あらかじめ辺を細かくしておく
+// 辺 i→i+1 の曲線上の点(t = 0〜1)。trace() が描く曲線と同じ式
+let CPX = 0, CPY = 0;
+function edgePoint(x, y, n, i, t) {
+  const h = i > 0 ? i - 1 : n - 1, j = i + 1 < n ? i + 1 : 0, k = j + 1 < n ? j + 1 : 0;
+  const bx = x[i], by = y[i], cx = x[j], cy = y[j];
+  let tx = cx - x[h], ty = cy - y[h], ux = x[k] - bx, uy = y[k] - by;
+  const tl = Math.sqrt(tx * tx + ty * ty) || 1, ul = Math.sqrt(ux * ux + uy * uy) || 1;
+  const l = Math.sqrt((cx - bx) * (cx - bx) + (cy - by) * (cy - by)) / 3;
+  const p1x = bx + (tx / tl) * l, p1y = by + (ty / tl) * l;
+  const p2x = cx - (ux / ul) * l, p2y = cy - (uy / ul) * l;
+  const s = 1 - t, a = s * s * s, b = 3 * s * s * t, c = 3 * s * t * t, d = t * t * t;
+  CPX = a * bx + b * p1x + c * p2x + d * cx;
+  CPY = a * by + b * p1y + c * p2y + d * cy;
+}
+
+// しずくが落ちる場所のすぐ近くだけ、あらかじめ頂点を細かくしておく
 function refineNear(cx, cy, rad) {
   const r2 = rad * rad;
   for (const p of polys) {
@@ -399,9 +541,10 @@ function refineNear(cx, cy, rad) {
       const da = (ax - cx) * (ax - cx) + (ay - cy) * (ay - cy);
       const db = (bx - cx) * (bx - cx) + (by - cy) * (by - cy);
       if (da < r2 || db < r2) {
-        const k = Math.min(Math.ceil(Math.hypot(bx - ax, by - ay)), 16);
+        const k = Math.min(Math.ceil(Math.hypot(bx - ax, by - ay) / 1.5), 24);
         for (let s = 1; s < k; s++) {
-          nx.push(ax + ((bx - ax) * s) / k); ny.push(ay + ((by - ay) * s) / k);
+          edgePoint(x, y, n, i, s / k);
+          nx.push(CPX); ny.push(CPY);
         }
       }
     }
@@ -411,38 +554,44 @@ function refineNear(cx, cy, rad) {
 
 /* ------------------------------------------------------- 紙の質感 */
 
+// 紙の粒・繊維・ふちの陰りを、作品の上に重ねる別のキャンバスに一度だけ描く。
+// 毎コマ描き直さず、重ね合わせはブラウザに任せる。
 function buildGrain() {
-  if (grain) grain.remove();
-  grain = createGraphics(W, H);
-  grain.pixelDensity(1);
-  grain.loadPixels();
-  const px = grain.pixels;
+  if (!grain) {
+    grain = document.createElement('canvas');
+    grain.id = 'grain';
+    grain.setAttribute('aria-hidden', 'true');
+    document.getElementById('sheet').appendChild(grain);
+  }
+  grain.width = W; grain.height = H;
+  const g = grain.getContext('2d');
+  const img = g.createImageData(W, H), px = img.data;
   for (let i = 0; i < px.length; i += 4) {
     const v = Math.random() < 0.5 ? 0 : 255, a = Math.random();
     px[i] = px[i + 1] = px[i + 2] = v;
     px[i + 3] = a * a * 21;
   }
-  grain.updatePixels();
+  g.putImageData(img, 0, 0);
 
   // 和紙の繊維
-  grain.noFill();
   const count = Math.floor((W * H) / 2600);
   for (let i = 0; i < count; i++) {
     const x = Math.random() * W, y = Math.random() * H;
     const a = Math.random() * Math.PI * 2, l = 6 + Math.random() * 26;
-    const bend = (Math.random() - 0.5) * 1.6;
-    if (Math.random() < 0.5) grain.stroke(255, 255, 255, 26); else grain.stroke(70, 55, 35, 20);
-    grain.strokeWeight(0.4 + Math.random() * 0.5);
-    grain.bezier(
-      x, y,
+    const b = a + (Math.random() - 0.5) * 1.6;
+    g.strokeStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.1)' : 'rgba(70,55,35,0.08)';
+    g.lineWidth = 0.4 + Math.random() * 0.5;
+    g.beginPath();
+    g.moveTo(x, y);
+    g.bezierCurveTo(
       x + Math.cos(a) * l * 0.33, y + Math.sin(a) * l * 0.33,
-      x + Math.cos(a + bend) * l * 0.66, y + Math.sin(a + bend) * l * 0.66,
-      x + Math.cos(a + bend) * l, y + Math.sin(a + bend) * l
+      x + Math.cos(b) * l * 0.66, y + Math.sin(b) * l * 0.66,
+      x + Math.cos(b) * l, y + Math.sin(b) * l
     );
+    g.stroke();
   }
 
   // ふちをほんの少し暗くする
-  const g = grain.drawingContext;
   const v = g.createRadialGradient(W / 2, H / 2, U * 0.35, W / 2, H / 2, Math.hypot(W, H) * 0.6);
   v.addColorStop(0, 'rgba(0,0,0,0)');
   v.addColorStop(1, 'rgba(0,0,0,0.2)');
@@ -468,7 +617,7 @@ function handlePointer(dt) {
 // 押しっぱなしで、墨 → 透明 → 墨 … と交互に落ちて輪になる
 function userDrop() {
   const r = base * (userInk ? random(0.45, 0.8) : random(0.6, 1.2));
-  addDrop(mouseX, mouseY, r, userInk ? inkTone(777, userK++) : pal.paper);
+  addDrop(mouseX, mouseY, r, userInk ? inkTone(777, userK++) : null);
   userInk = !userInk;
 }
 
@@ -512,7 +661,12 @@ function setPaused(v) {
   b.setAttribute('aria-pressed', String(v));
 }
 
-function savePrint() { saveCanvas(`suminagashi-${seed}-${pal.name}`, 'png'); }
+function savePrint() {
+  render();
+  drawingContext.drawImage(grain, 0, 0, W, H); // 保存する画像にだけ紙の質感を焼きこむ
+  saveCanvas(`suminagashi-${seed}-${pal.name}`, 'png');
+  dirty = true;
+}
 
 function bindUI() {
   document.getElementById('btn-new').addEventListener('click', nextSheet);
@@ -536,6 +690,7 @@ function windowResized() {
   for (const s of sources) { s.x += ox; s.y += oy; }
   for (const h of hands) if (!sources.includes(h.src)) { h.src.x += ox; h.src.y += oy; }
   W = width; H = height; U = Math.min(W, H);
+  dirty = true;
   clearTimeout(grainTimer);
   grainTimer = setTimeout(buildGrain, 160);
 }

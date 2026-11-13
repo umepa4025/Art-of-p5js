@@ -27,6 +27,13 @@ body {
   cursor: crosshair;
 }
 
+/* 紙の質感。作品の上に重ねるだけで、操作は下のキャンバスに通す */
+#sheet #grain {
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
 .ui {
   position: fixed;
   inset: 0;

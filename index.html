@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>墨流し</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@400;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- body:start -->
+<main id="sheet" aria-label="墨流しの水面。触れると墨が落ち、なぞると水面が動きます"></main>
+
+<div class="ui" id="ui">
+  <header class="daisen">
+    <h1>墨流し</h1>
+    <p id="leaf">第〇〇〇〇葉</p>
+  </header>
+  <div class="foot">
+    <p class="hint" id="hint">水面に触れると墨が落ち、なぞると流れが生まれます。</p>
+    <p class="hint" id="wait" role="status" hidden>墨を流しています…</p>
+    <nav class="tools" aria-label="操作">
+      <button type="button" id="btn-new">新しい紙</button>
+      <button type="button" id="btn-pause" aria-pressed="false">止める</button>
+      <button type="button" id="btn-save">保存</button>
+    </nav>
+  </div>
+</div>
+<!-- body:end -->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.10/p5.min.js"></script>
+<script src="sketch.js"></script>
+</body>
+</html>

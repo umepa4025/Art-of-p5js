@@ -1,0 +1,133 @@
+/* 画面いっぱいの一枚の紙。題箋(だいせん＝巻物や和本に貼る題名の細い札)と小さな道具だけを上に置く */
+:root {
+  --paper: #ece6d8;   /* 紙の色。作品の配色に合わせてスクリプトが書き換える */
+  --ink: #1c1c20;     /* 文字と線の色。同上 */
+  --slip: color-mix(in srgb, var(--paper) 88%, transparent);
+  --rule: color-mix(in srgb, var(--ink) 28%, transparent);
+  --font-display: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif;
+  --font-body: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif;
+}
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  transition: background-color 1.2s ease, color 1.2s ease;
+}
+
+#sheet canvas {
+  position: fixed;
+  inset: 0;
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.ui {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 12px;
+  padding-top: calc(18px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  pointer-events: none;
+}
+
+.daisen {
+  justify-self: start;
+  align-self: start;
+  writing-mode: vertical-rl;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 16px 7px 18px;
+  background: var(--slip);
+  border: 1px solid var(--rule);
+  box-shadow: 0 1px 6px color-mix(in srgb, var(--ink) 14%, transparent);
+  transition: background-color 1.2s ease, border-color 1.2s ease;
+}
+
+.daisen h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: 0.32em;
+  line-height: 1.2;
+}
+
+.daisen p {
+  margin: 0;
+  padding-top: 2.2em;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  line-height: 1.3;
+  opacity: 0.75;
+}
+
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 10px 16px;
+}
+
+.hint {
+  margin: 0;
+  min-width: 0;
+  max-width: 30em;
+  padding: 5px 10px;
+  background: var(--slip);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  line-height: 1.7;
+  text-wrap: balance;
+  transition: opacity 1.6s ease, background-color 1.2s ease;
+}
+
+.hint.gone { opacity: 0; }
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  pointer-events: auto;
+}
+
+.tools button {
+  appearance: none;
+  padding: 7px 13px;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  background: var(--slip);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  opacity: 0.82;
+  transition: opacity 0.2s ease, background-color 1.2s ease, color 1.2s ease;
+}
+
+.tools button:hover { opacity: 1; }
+
+.tools button:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+[hidden] { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  body, .daisen, .hint, .tools button { transition: none; }
+}
